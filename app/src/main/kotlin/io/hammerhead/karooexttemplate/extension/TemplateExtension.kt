@@ -13,6 +13,7 @@ import io.hammerhead.karooext.models.ShowSymbols
 import io.hammerhead.karooext.models.StreamState
 import io.hammerhead.karooext.models.Symbol
 import org.json.JSONArray
+import io.hammerhead.karooext.models.PlayBeepPattern
 
 data class Descent(
     val name: String,
