@@ -1,19 +1,24 @@
 package io.hammerhead.karooexttemplate.extension
 import android.content.Context
+import android.graphics.Color
+import android.widget.RemoteViews
 import io.hammerhead.karooext.KarooSystemService
 import io.hammerhead.karooext.extension.DataTypeImpl
 import io.hammerhead.karooext.extension.KarooExtension
 import io.hammerhead.karooext.internal.Emitter
+import io.hammerhead.karooext.internal.ViewEmitter
 import io.hammerhead.karooext.models.DataPoint
 import io.hammerhead.karooext.models.DataType
 import io.hammerhead.karooext.models.MapEffect
 import io.hammerhead.karooext.models.OnLocationChanged
+import io.hammerhead.karooext.models.PlayBeepPattern
 import io.hammerhead.karooext.models.ShowPolyline
 import io.hammerhead.karooext.models.ShowSymbols
 import io.hammerhead.karooext.models.StreamState
 import io.hammerhead.karooext.models.Symbol
+import io.hammerhead.karooext.models.ViewConfig
+import io.hammerhead.karooexttemplate.R
 import org.json.JSONArray
-import io.hammerhead.karooext.models.PlayBeepPattern
 
 data class Descent(
     val name: String,
@@ -74,6 +79,61 @@ fun readDescents(context: Context): List<Descent> {
     return out
 }
 
+class Snapshot(
+    val onSegment: Boolean,
+    val delta: Double,
+    val fraction: Double,
+    val label: String,
+    val distToStart: Double,
+    val started: Boolean,
+    val finished: Boolean
+)
+
+class LiveTracker(private val descents: List<Descent>) {
+    private var active: Descent? = null
+    private var startMs = 0L
+    private var traveled = 0.0
+    private var lastLat = 0.0
+    private var lastLng = 0.0
+
+    fun update(lat: Double, lng: Double): Snapshot {
+        val a = active
+        if (a == null) {
+            var near: Descent? = null
+            var best = -1.0
+            for (d in descents) {
+                val dist = haversine(lat, lng, d.lat, d.lng)
+                if (best < 0 || dist < best) { best = dist; near = d }
+            }
+            val n = near
+            if (n != null && best in 0.0..50.0 && n.komSec > 0 && n.lengthM > 0) {
+                active = n
+                startMs = System.currentTimeMillis()
+                traveled = 0.0
+                lastLat = lat
+                lastLng = lng
+                return Snapshot(true, 0.0, 0.0, n.name, 0.0, true, false)
+            }
+            return Snapshot(false, 0.0, 0.0, n?.name ?: "", if (best < 0) 0.0 else best, false, false)
+        }
+        traveled += haversine(lastLat, lastLng, lat, lng)
+        lastLat = lat
+        lastLng = lng
+        val elapsed = (System.currentTimeMillis() - startMs) / 1000.0
+        var frac = traveled / a.lengthM
+        if (frac < 0.0) frac = 0.0
+        if (frac > 1.0) frac = 1.0
+        val delta = elapsed - a.komSec * frac
+        val toEnd = haversine(lat, lng, a.endLat, a.endLng)
+        var finished = false
+        if (frac > 0.8 && toEnd < 50.0) {
+            active = null
+            finished = true
+        }
+        return Snapshot(true, delta, frac, a.name, 0.0, false, finished)
+    }
+}
+
 class TemplateExtension : KarooExtension("template-id", "1.0") {
 
     lateinit var karooSystem: KarooSystemService
@@ -81,7 +141,8 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
     override val types by lazy {
         listOf(
             DescentDistanceType(this, extension),
-            DescentDeltaType(this, extension)
+            DescentDeltaType(this, extension),
+            DescentLiveType(this, extension)
         )
     }
 
@@ -89,6 +150,14 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
         super.onCreate()
         karooSystem = KarooSystemService(applicationContext)
         karooSystem.connect { }
+    }
+
+    fun beep(vararg tones: Pair<Int?, Int>) {
+        try {
+            karooSystem.dispatch(
+                PlayBeepPattern(tones.map { PlayBeepPattern.Tone(it.first, it.second) })
+            )
+        } catch (e: Exception) { }
     }
 
     override fun startMap(emitter: Emitter<MapEffect>) {
@@ -123,7 +192,6 @@ class DescentDistanceType(
             return
         }
         emitter.onNext(StreamState.Searching)
-
         val consumerId = ext.karooSystem.addConsumer { loc: OnLocationChanged ->
             var best = -1.0
             for (d in descents) {
@@ -147,14 +215,6 @@ class DescentDeltaType(
     extension: String
 ) : DataTypeImpl(extension, "descent-delta") {
 
-    private fun beep(vararg tones: Pair<Int?, Int>) {
-        try {
-            ext.karooSystem.dispatch(
-                PlayBeepPattern(tones.map { PlayBeepPattern.Tone(it.first, it.second) })
-            )
-        } catch (e: Exception) { }
-    }
-
     override fun startStream(emitter: Emitter<StreamState>) {
         val descents = readDescents(ext.applicationContext)
         if (descents.isEmpty()) {
@@ -162,56 +222,78 @@ class DescentDeltaType(
             return
         }
         emitter.onNext(StreamState.Searching)
+        val tracker = LiveTracker(descents)
+        val consumerId = ext.karooSystem.addConsumer { loc: OnLocationChanged ->
+            val s = tracker.update(loc.lat, loc.lng)
+            if (s.onSegment) {
+                emitter.onNext(
+                    StreamState.Streaming(DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to s.delta)))
+                )
+            } else {
+                emitter.onNext(StreamState.Searching)
+            }
+        }
+        emitter.setCancellable {
+            try { ext.karooSystem.removeConsumer(consumerId) } catch (e: Exception) { }
+        }
+    }
+}
 
-        var active: Descent? = null
-        var startMs = 0L
-        var traveled = 0.0
-        var lastLat = 0.0
-        var lastLng = 0.0
+class DescentLiveType(
+    private val ext: TemplateExtension,
+    extension: String
+) : DataTypeImpl(extension, "descent-live") {
+
+    override fun startStream(emitter: Emitter<StreamState>) {
+        val descents = readDescents(ext.applicationContext)
+        if (descents.isEmpty()) {
+            emitter.onNext(StreamState.NotAvailable)
+            return
+        }
+        val tracker = LiveTracker(descents)
+        val consumerId = ext.karooSystem.addConsumer { loc: OnLocationChanged ->
+            val s = tracker.update(loc.lat, loc.lng)
+            val v = if (s.onSegment) s.delta else s.distToStart
+            emitter.onNext(
+                StreamState.Streaming(DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to v)))
+            )
+        }
+        emitter.setCancellable {
+            try { ext.karooSystem.removeConsumer(consumerId) } catch (e: Exception) { }
+        }
+    }
+
+    override fun startView(context: Context, config: ViewConfig, emitter: ViewEmitter) {
+        val descents = readDescents(ext.applicationContext)
+        val tracker = LiveTracker(descents)
+
+        fun render(big: String, sub: String, color: Int, progress: Int) {
+            val rv = RemoteViews(context.packageName, R.layout.field_discesa)
+            rv.setTextViewText(R.id.dv_value, big)
+            rv.setTextColor(R.id.dv_value, color)
+            rv.setTextViewText(R.id.dv_sub, sub)
+            rv.setProgressBar(R.id.dv_bar, 100, progress, false)
+            emitter.updateView(rv)
+        }
+
+        if (descents.isEmpty()) {
+            render("--", "nessun segmento salvato", Color.WHITE, 0)
+            return
+        }
+        render("--", "attendo GPS", Color.WHITE, 0)
 
         val consumerId = ext.karooSystem.addConsumer { loc: OnLocationChanged ->
-            val a = active
-            if (a == null) {
-                var near: Descent? = null
-                var best = -1.0
-                for (d in descents) {
-                    val dist = haversine(loc.lat, loc.lng, d.lat, d.lng)
-                    if (best < 0 || dist < best) { best = dist; near = d }
-                }
-                val n = near
-                if (n != null && best in 0.0..50.0 && n.komSec > 0 && n.lengthM > 0) {
-                    active = n
-                    startMs = System.currentTimeMillis()
-                    traveled = 0.0
-                    lastLat = loc.lat
-                    lastLng = loc.lng
-                    beep(1200 to 120, null to 60, 1600 to 220)
-                    emitter.onNext(
-                        StreamState.Streaming(DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to 0.0)))
-                    )
-                } else {
-                    emitter.onNext(StreamState.Searching)
-                }
+            val s = tracker.update(loc.lat, loc.lng)
+            if (s.started) ext.beep(1200 to 120, null to 60, 1600 to 220)
+            if (s.finished) ext.beep(1600 to 150, null to 80, 1600 to 150, null to 80, 1900 to 400)
+
+            if (s.onSegment) {
+                val sign = if (s.delta <= 0) "" else "+"
+                val txt = sign + String.format("%.1f", s.delta)
+                val col = if (s.delta <= 0) Color.GREEN else Color.RED
+                render(txt, s.label, col, (s.fraction * 100).toInt())
             } else {
-                traveled += haversine(lastLat, lastLng, loc.lat, loc.lng)
-                lastLat = loc.lat
-                lastLng = loc.lng
-
-                val elapsed = (System.currentTimeMillis() - startMs) / 1000.0
-                var frac = traveled / a.lengthM
-                if (frac < 0.0) frac = 0.0
-                if (frac > 1.0) frac = 1.0
-                val delta = elapsed - a.komSec * frac
-
-                emitter.onNext(
-                    StreamState.Streaming(DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to delta)))
-                )
-
-                val toEnd = haversine(loc.lat, loc.lng, a.endLat, a.endLng)
-                if (frac > 0.8 && toEnd < 50.0) {
-                    active = null
-                    beep(1600 to 150, null to 80, 1600 to 150, null to 80, 1900 to 400)
-                }
+                render("${s.distToStart.toInt()} m", s.label, Color.WHITE, 0)
             }
         }
         emitter.setCancellable {
