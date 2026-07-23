@@ -1,60 +1,70 @@
 package io.hammerhead.karooexttemplate.extension
-import android.content.Context
-import android.location.Location
-import android.location.LocationListener
-import android.location.LocationManager
+import io.hammerhead.karooext.KarooSystemService
 import io.hammerhead.karooext.extension.DataTypeImpl
 import io.hammerhead.karooext.extension.KarooExtension
 import io.hammerhead.karooext.internal.Emitter
 import io.hammerhead.karooext.models.DataPoint
 import io.hammerhead.karooext.models.DataType
+import io.hammerhead.karooext.models.OnLocationChanged
 import io.hammerhead.karooext.models.StreamState
 import org.json.JSONArray
 
 class TemplateExtension : KarooExtension("template-id", "1.0") {
+
+    lateinit var karooSystem: KarooSystemService
+
     override val types by lazy {
-        listOf(DescentDistanceType(applicationContext, extension))
+        listOf(DescentDistanceType(this, extension))
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        karooSystem = KarooSystemService(applicationContext)
+        karooSystem.connect { }
+    }
+
+    override fun onDestroy() {
+        try { karooSystem.disconnect() } catch (e: Exception) { }
+        super.onDestroy()
     }
 }
 
 class DescentDistanceType(
-    private val context: Context,
+    private val ext: TemplateExtension,
     extension: String
 ) : DataTypeImpl(extension, "descent-distance") {
 
     override fun startStream(emitter: Emitter<StreamState>) {
-        val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
         val descents = readDescents()
 
-        val listener = object : LocationListener {
-            override fun onLocationChanged(location: Location) {
-                var best = -1.0
-                for (d in descents) {
-                    val dist = haversine(location.latitude, location.longitude, d[0], d[1])
-                    if (best < 0 || dist < best) best = dist
-                }
-                if (best < 0) best = 0.0
-                emitter.onNext(
-                    StreamState.Streaming(
-                        DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to best))
-                    )
-                )
-            }
-        }
+        // valore immediato: quanti segmenti sono in memoria (serve a capire se lo stream vive)
+        emit(emitter, descents.size.toDouble())
 
-        try {
-            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, listener)
-        } catch (e: Exception) {
-            emitter.onNext(StreamState.NotAvailable)
+        val consumerId = ext.karooSystem.addConsumer { loc: OnLocationChanged ->
+            var best = -1.0
+            for (d in descents) {
+                val dist = haversine(loc.lat, loc.lng, d[0], d[1])
+                if (best < 0 || dist < best) best = dist
+            }
+            emit(emitter, if (best < 0) 0.0 else best)
         }
 
         emitter.setCancellable {
-            try { lm.removeUpdates(listener) } catch (e: Exception) { }
+            try { ext.karooSystem.removeConsumer(consumerId) } catch (e: Exception) { }
         }
     }
 
+    private fun emit(emitter: Emitter<StreamState>, value: Double) {
+        emitter.onNext(
+            StreamState.Streaming(
+                DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to value))
+            )
+        )
+    }
+
     private fun readDescents(): List<DoubleArray> {
-        val prefs = context.getSharedPreferences("karoo_discesa", Context.MODE_PRIVATE)
+        val prefs = ext.applicationContext
+            .getSharedPreferences("karoo_discesa", android.content.Context.MODE_PRIVATE)
         val raw = prefs.getString("descents", null) ?: return emptyList()
         val out = ArrayList<DoubleArray>()
         try {
