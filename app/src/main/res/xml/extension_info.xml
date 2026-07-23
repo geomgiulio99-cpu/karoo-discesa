@@ -3,7 +3,8 @@
     displayName="@string/extension_name"
     icon="@drawable/ic_launcher_foreground"
     id="template-id"
-    scansDevices="false">
+    scansDevices="false"
+    mapLayer="true">
     <DataType
         typeId="descent-distance"
         displayName="@string/dt_descent_name"
