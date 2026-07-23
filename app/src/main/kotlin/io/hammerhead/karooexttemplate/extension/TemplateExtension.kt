@@ -147,6 +147,14 @@ class DescentDeltaType(
     extension: String
 ) : DataTypeImpl(extension, "descent-delta") {
 
+    private fun beep(vararg tones: Pair<Int?, Int>) {
+        try {
+            ext.karooSystem.dispatch(
+                PlayBeepPattern(tones.map { PlayBeepPattern.Tone(it.first, it.second) })
+            )
+        } catch (e: Exception) { }
+    }
+
     override fun startStream(emitter: Emitter<StreamState>) {
         val descents = readDescents(ext.applicationContext)
         if (descents.isEmpty()) {
@@ -171,12 +179,13 @@ class DescentDeltaType(
                     if (best < 0 || dist < best) { best = dist; near = d }
                 }
                 val n = near
-                if (n != null && best in 0.0..30.0 && n.komSec > 0 && n.lengthM > 0) {
+                if (n != null && best in 0.0..50.0 && n.komSec > 0 && n.lengthM > 0) {
                     active = n
                     startMs = System.currentTimeMillis()
                     traveled = 0.0
                     lastLat = loc.lat
                     lastLng = loc.lng
+                    beep(1200 to 120, null to 60, 1600 to 220)
                     emitter.onNext(
                         StreamState.Streaming(DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to 0.0)))
                     )
@@ -199,8 +208,9 @@ class DescentDeltaType(
                 )
 
                 val toEnd = haversine(loc.lat, loc.lng, a.endLat, a.endLng)
-                if (frac > 0.8 && toEnd < 30.0) {
+                if (frac > 0.8 && toEnd < 50.0) {
                     active = null
+                    beep(1600 to 150, null to 80, 1600 to 150, null to 80, 1900 to 400)
                 }
             }
         }
