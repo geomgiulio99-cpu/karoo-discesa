@@ -63,6 +63,7 @@ class MainActivity : ComponentActivity() {
         Thread {
             status = try {
                 loadDescents()
+                saveDescents()
                 "Caricati ${descents.size} segmenti in discesa."
             } catch (e: Exception) {
                 "ERRORE Strava:\n${e.message}"
@@ -194,5 +195,16 @@ class MainActivity : ComponentActivity() {
                 Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
                 Math.sin(dLon / 2) * Math.sin(dLon / 2)
         return r * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    }
+    private fun saveDescents() {
+        val arr = JSONArray()
+        for (d in descents) {
+            val o = JSONObject()
+            o.put("name", d.name); o.put("lat", d.lat); o.put("lng", d.lng)
+            o.put("kom", d.kom); o.put("len", d.lengthM)
+            arr.put(o)
+        }
+        getSharedPreferences("karoo_discesa", MODE_PRIVATE)
+            .edit().putString("descents", arr.toString()).apply()
     }
 }
