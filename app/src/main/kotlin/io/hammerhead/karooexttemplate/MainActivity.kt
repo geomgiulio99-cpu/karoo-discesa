@@ -1,14 +1,13 @@
 package io.hammerhead.karooexttemplate
+import android.Manifest
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Bundle
-import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import io.hammerhead.karooext.KarooSystemService
-import io.hammerhead.karooext.models.OnLocationChanged
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -20,94 +19,149 @@ class MainActivity : ComponentActivity() {
     private val clientId = "190895"
     private val clientSecret = "827974f8301df4438afac3c05be00a4dfd723817"
     private val refreshToken = "31475ab564010a7acb01268571b6251b2ea05f78"
-    // ===================================
+    // ==================================
 
     private val maxDescents = 15
 
-    private lateinit var liveView: TextView
+    private data class Descent(
+        val name: String,
+        val lat: Double,
+        val lng: Double,
+        val kom: String,
+        val lengthM: Int
+    )
+
     private lateinit var output: TextView
-    private lateinit var karooSystem: KarooSystemService
+    private val descents = ArrayList<Descent>()
+    private var status = "Connessione a Strava..."
+    private var lastLoc: Location? = null
+    private var permissionAsked = false
+    private var gpsStarted = false
+
+    private val locationManager by lazy {
+        getSystemService(LOCATION_SERVICE) as LocationManager
+    }
+
+    private val listener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            lastLoc = location
+            render()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        liveView = TextView(this).apply {
-            textSize = 16f
-            setPadding(24, 24, 24, 12)
-            text = "GPS: in attesa del segnale..."
-        }
         val scroll = ScrollView(this)
         output = TextView(this).apply {
-            textSize = 14f
-            setPadding(24, 12, 24, 24)
-            text = "Carico i segmenti..."
+            textSize = 15f
+            setPadding(24, 24, 24, 24)
         }
         scroll.addView(output)
-        root.addView(liveView)
-        root.addView(scroll)
-        setContentView(root)
+        setContentView(scroll)
+        render()
 
-        // 1) GPS dal vivo tramite il sistema Karoo
-        karooSystem = KarooSystemService(applicationContext)
-        karooSystem.connect { connected ->
-            if (connected) {
-                CoroutineScope(Dispatchers.Main).launch {
-                    try {
-                        karooSystem.consumerFlow<OnLocationChanged>().collect { loc ->
-                            liveView.text = "GPS attivo ✅  lat ${"%.5f".format(loc.lat)}, lon ${"%.5f".format(loc.lng)}"
-                        }
-                    } catch (e: Exception) {
-                        liveView.text = "GPS errore: ${e.message}"
-                    }
-                }
-            } else {
-                liveView.text = "Karoo non connesso al sistema"
-            }
-        }
-
-        // 2) Lista dei segmenti preferiti in discesa (come prima)
         Thread {
-            val result = try { loadSegments() } catch (e: Exception) { "ERRORE lista:\n${e.message}" }
-            runOnUiThread { output.text = result }
+            status = try {
+                loadDescents()
+                "Caricati ${descents.size} segmenti in discesa."
+            } catch (e: Exception) {
+                "ERRORE Strava:\n${e.message}"
+            }
+            runOnUiThread { render() }
         }.start()
     }
 
-    private fun loadSegments(): String {
+    override fun onResume() {
+        super.onResume()
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+            == PackageManager.PERMISSION_GRANTED) {
+            startGps()
+        } else if (!permissionAsked) {
+            permissionAsked = true
+            requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 1)
+        }
+    }
+
+    private fun startGps() {
+        if (gpsStarted) return
+        gpsStarted = true
+        try {
+            lastLoc = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+            locationManager.requestLocationUpdates(
+                LocationManager.GPS_PROVIDER, 1000L, 0f, listener
+            )
+        } catch (e: Exception) {
+            status = "ERRORE GPS: ${e.message}"
+        }
+        render()
+    }
+
+    override fun onDestroy() {
+        try { locationManager.removeUpdates(listener) } catch (e: Exception) { }
+        super.onDestroy()
+    }
+
+    private fun render() {
+        val sb = StringBuilder()
+        sb.append(status).append("\n\n")
+        val loc = lastLoc
+        if (loc == null) {
+            sb.append("Attendo il GPS del Karoo...\n(meglio all'aperto o vicino a una finestra)")
+        } else {
+            sb.append("GPS: ${"%.5f".format(loc.latitude)}, ${"%.5f".format(loc.longitude)}\n\n")
+            if (descents.isEmpty()) {
+                sb.append("Segmenti non ancora caricati.")
+            } else {
+                var nearest: Descent? = null
+                var best = Double.MAX_VALUE
+                for (d in descents) {
+                    val dist = haversine(loc.latitude, loc.longitude, d.lat, d.lng)
+                    if (dist < best) { best = dist; nearest = d }
+                }
+                val n = nearest
+                if (n != null) {
+                    sb.append("Discesa più vicina:\n")
+                    sb.append("• ${n.name}\n")
+                    sb.append("   partenza a ${best.toInt()} m\n")
+                    sb.append("   KOM ${n.kom} · lunghezza ${n.lengthM} m\n\n")
+                    sb.append("Muoviti: se la distanza cambia, il GPS live funziona ✅")
+                }
+            }
+        }
+        output.text = sb.toString()
+    }
+
+    private fun loadDescents() {
         val token = getAccessToken()
-        val descents = ArrayList<JSONObject>()
         var page = 1
-        while (true) {
+        loop@ while (true) {
             val arr = JSONArray(apiGet("/segments/starred?per_page=100&page=$page", token))
             if (arr.length() == 0) break
             for (i in 0 until arr.length()) {
+                if (descents.size >= maxDescents) break@loop
                 val seg = arr.getJSONObject(i)
-                if (seg.optDouble("average_grade", 0.0) < 0) descents.add(seg)
+                if (seg.optDouble("average_grade", 0.0) >= 0) continue
+                val start = seg.optJSONArray("start_latlng") ?: continue
+                if (start.length() < 2) continue
+                val id = seg.getLong("id")
+                val name = seg.optString("name", "(senza nome)")
+                val lengthM = seg.optDouble("distance", 0.0).toInt()
+                val detail = JSONObject(apiGet("/segments/$id", token))
+                val kom = detail.optJSONObject("xoms")?.optString("kom")?.ifBlank { null } ?: "n/d"
+                descents.add(Descent(name, start.getDouble(0), start.getDouble(1), kom, lengthM))
+                Thread.sleep(200)
             }
             if (arr.length() < 100) break
             page++
         }
-        if (descents.isEmpty()) return "Nessun segmento in discesa tra i preferiti."
-
-        val sb = StringBuilder("Segmenti in discesa (primi ${minOf(descents.size, maxDescents)}):\n\n")
-        var count = 0
-        for (seg in descents) {
-            if (count >= maxDescents) break
-            count++
-            val id = seg.getLong("id")
-            val name = seg.optString("name", "(senza nome)")
-            val kom = JSONObject(apiGet("/segments/$id", token))
-                .optJSONObject("xoms")?.optString("kom")?.ifBlank { null } ?: "n/d"
-            sb.append("• $name — KOM $kom\n")
-            Thread.sleep(200)
-        }
-        return sb.toString()
     }
 
     private fun getAccessToken(): String {
         val conn = (URL("https://www.strava.com/oauth/token").openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"; doOutput = true
-            connectTimeout = 15000; readTimeout = 15000
+            requestMethod = "POST"
+            doOutput = true
+            connectTimeout = 15000
+            readTimeout = 15000
             setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
         }
         val body = "client_id=$clientId&client_secret=$clientSecret&refresh_token=$refreshToken&grant_type=refresh_token"
@@ -117,7 +171,8 @@ class MainActivity : ComponentActivity() {
 
     private fun apiGet(endpoint: String, token: String): String {
         val conn = (URL("https://www.strava.com/api/v3$endpoint").openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15000; readTimeout = 15000
+            connectTimeout = 15000
+            readTimeout = 15000
             setRequestProperty("Authorization", "Bearer $token")
         }
         return readResponse(conn)
@@ -131,8 +186,13 @@ class MainActivity : ComponentActivity() {
         return text
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        if (::karooSystem.isInitialized) karooSystem.disconnect()
+    private fun haversine(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val r = 6371000.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2)
+        return r * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
     }
 }
