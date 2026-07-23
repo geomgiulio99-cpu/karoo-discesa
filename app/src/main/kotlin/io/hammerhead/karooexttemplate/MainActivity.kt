@@ -27,6 +27,9 @@ class MainActivity : ComponentActivity() {
         val name: String,
         val lat: Double,
         val lng: Double,
+        val endLat: Double,
+        val endLng: Double,
+        val poly: String,
         val kom: String,
         val lengthM: Int
     )
@@ -149,7 +152,11 @@ class MainActivity : ComponentActivity() {
                 val lengthM = seg.optDouble("distance", 0.0).toInt()
                 val detail = JSONObject(apiGet("/segments/$id", token))
                 val kom = detail.optJSONObject("xoms")?.optString("kom")?.ifBlank { null } ?: "n/d"
-                descents.add(Descent(name, start.getDouble(0), start.getDouble(1), kom, lengthM))
+                val poly = detail.optJSONObject("map")?.optString("polyline") ?: ""
+                val end = seg.optJSONArray("end_latlng")
+                val endLat = if (end != null && end.length() >= 2) end.getDouble(0) else start.getDouble(0)
+                val endLng = if (end != null && end.length() >= 2) end.getDouble(1) else start.getDouble(1)
+                descents.add(Descent(name, start.getDouble(0), start.getDouble(1), endLat, endLng, poly, kom, lengthM))
                 Thread.sleep(200)
             }
             if (arr.length() < 100) break
@@ -201,6 +208,7 @@ class MainActivity : ComponentActivity() {
         for (d in descents) {
             val o = JSONObject()
             o.put("name", d.name); o.put("lat", d.lat); o.put("lng", d.lng)
+            o.put("endLat", d.endLat); o.put("endLng", d.endLng); o.put("poly", d.poly)
             o.put("kom", d.kom); o.put("len", d.lengthM)
             arr.put(o)
         }
