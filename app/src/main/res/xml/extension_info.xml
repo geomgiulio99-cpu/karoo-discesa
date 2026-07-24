@@ -17,10 +17,4 @@
         description="@string/dt_delta_desc"
         graphical="false"
         icon="@drawable/ic_launcher_foreground" />
-    <DataType
-        typeId="descent-live"
-        displayName="@string/dt_live_name"
-        description="@string/dt_live_desc"
-        graphical="true"
-        icon="@drawable/ic_launcher_foreground" />
 </ExtensionInfo>
