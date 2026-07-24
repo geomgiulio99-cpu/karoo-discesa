@@ -8,4 +8,8 @@
     <string name="dt_delta_desc">Secondi di vantaggio o ritardo sul KOM nel segmento in discesa</string>
     <string name="dt_live_name">Discesa LIVE</string>
     <string name="dt_live_desc">Distanza, distacco dal KOM e avanzamento nel segmento in discesa</string>
+    <string name="dt_descent_name">Discesa vicina</string>
+    <string name="dt_descent_desc">Distanza dalla partenza del segmento in discesa più vicino</string>
+    <string name="dt_delta_name">Distacco KOM</string>
+    <string name="dt_delta_desc">Secondi di vantaggio o ritardo sul KOM nel segmento in discesa</string>
 </resources>
