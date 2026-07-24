@@ -64,11 +64,17 @@ class MainActivity : ComponentActivity() {
         Thread {
             try {
                 loadDescents()
+                saveDescents()
+                setStatus("Pronto: ${descents.size} segmenti in discesa salvati.")
             } catch (e: Exception) {
-                status = "ERRORE Strava:\n${e.message}"
+                setStatus("ERRORE Strava:\n${e.message}")
             }
-            runOnUiThread { render() }
         }.start()
+    }
+
+    private fun setStatus(s: String) {
+        status = s
+        runOnUiThread { render() }
     }
 
     override fun onResume() {
@@ -101,30 +107,24 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun setStatus(s: String) {
-        status = s
-        runOnUiThread { render() }
-    }
-
     private fun render() {
         val sb = StringBuilder()
         sb.append(status).append("\n\n")
         val loc = lastLoc
         if (loc == null) {
-            sb.append("Attendo il GPS del Karoo...")
+            sb.append("GPS: in attesa...")
         } else {
             sb.append("GPS: ${"%.5f".format(loc.latitude)}, ${"%.5f".format(loc.longitude)}\n\n")
             if (descents.isNotEmpty()) {
                 var nearest: Descent? = null
-                var best = Double.MAX_VALUE
+                var best = -1.0
                 for (d in descents) {
                     val dist = haversine(loc.latitude, loc.longitude, d.lat, d.lng)
-                    if (dist < best) { best = dist; nearest = d }
+                    if (best < 0 || dist < best) { best = dist; nearest = d }
                 }
                 val n = nearest
                 if (n != null) {
-                    sb.append("Discesa più vicina:\n")
-                    sb.append("• ${n.name}\n")
+                    sb.append("Discesa più vicina:\n• ${n.name}\n")
                     sb.append("   partenza a ${best.toInt()} m\n")
                     sb.append("   KOM ${n.kom} · lunghezza ${n.lengthM} m")
                 }
@@ -135,79 +135,90 @@ class MainActivity : ComponentActivity() {
 
     private fun loadDescents() {
         val token = getAccessToken()
-        setStatus("Leggo i preferiti da Strava...")
+        val prefs = getSharedPreferences("karoo_discesa", MODE_PRIVATE)
+        val cache = try {
+            JSONObject(prefs.getString("segcache", "{}") ?: "{}")
+        } catch (e: Exception) { JSONObject() }
+
+        setStatus("Scarico l'elenco dei preferiti...")
 
         val starred = ArrayList<JSONObject>()
         var page = 1
         while (true) {
             val arr = JSONArray(apiGet("/segments/starred?per_page=200&page=$page", token))
             if (arr.length() == 0) break
-            for (i in 0 until arr.length()) {
-                val seg = arr.getJSONObject(i)
-                if (seg.optDouble("average_grade", 0.0) < 0) starred.add(seg)
-            }
-            setStatus("Preferiti in discesa trovati: ${starred.size}")
+            for (i in 0 until arr.length()) starred.add(arr.getJSONObject(i))
+            setStatus("Preferiti trovati: ${starred.size}...")
             if (arr.length() < 200) break
             page++
-            Thread.sleep(200)
+            Thread.sleep(300)
         }
 
-        val prefs = getSharedPreferences("karoo_discesa", MODE_PRIVATE)
-        val cache = try {
-            JSONObject(prefs.getString("details", "{}") ?: "{}")
-        } catch (e: Exception) { JSONObject() }
+        val onlyDescents = ArrayList<JSONObject>()
+        for (s in starred) {
+            if (s.optDouble("average_grade", 0.0) < 0 && s.optJSONArray("start_latlng") != null) {
+                onlyDescents.add(s)
+            }
+        }
 
-        var rateLimited = false
+        setStatus("Preferiti: ${starred.size} · in discesa: ${onlyDescents.size}\nRecupero i KOM...")
+
         var done = 0
-        var nuovi = 0
-        for (seg in starred) {
-            val id = seg.getLong("id").toString()
-            if (!cache.has(id)) {
+        var errors = 0
+        descents.clear()
+        for (seg in onlyDescents) {
+            val id = seg.getLong("id")
+            val key = id.toString()
+            var kom = "n/d"
+            var poly = ""
+
+            if (cache.has(key)) {
+                val c = cache.getJSONObject(key)
+                kom = c.optString("kom", "n/d")
+                poly = c.optString("poly", "")
+            } else {
                 try {
                     val detail = JSONObject(apiGet("/segments/$id", token))
-                    val o = JSONObject()
-                    o.put("kom", detail.optJSONObject("xoms")?.optString("kom")?.ifBlank { null } ?: "n/d")
-                    o.put("poly", detail.optJSONObject("map")?.optString("polyline") ?: "")
-                    cache.put(id, o)
-                    prefs.edit().putString("details", cache.toString()).apply()
-                    nuovi++
-                    Thread.sleep(250)
+                    kom = detail.optJSONObject("xoms")?.optString("kom")?.ifBlank { null } ?: "n/d"
+                    poly = detail.optJSONObject("map")?.optString("polyline") ?: ""
+                    val c = JSONObject()
+                    c.put("kom", kom)
+                    c.put("poly", poly)
+                    cache.put(key, c)
+                    Thread.sleep(300)
                 } catch (e: Exception) {
-                    if ((e.message ?: "").contains("HTTP 429")) { rateLimited = true; break }
+                    errors++
+                    if (errors >= 3) {
+                        prefs.edit().putString("segcache", cache.toString()).apply()
+                        setStatus(
+                            "Limite API Strava raggiunto.\n" +
+                            "Salvati ${descents.size} segmenti su ${onlyDescents.size}.\n" +
+                            "Riapri l'app tra ~15 minuti per completare."
+                        )
+                        return
+                    }
                 }
             }
-            done++
-            if (done % 5 == 0) setStatus("Dettagli: $done / ${starred.size} (nuovi scaricati: $nuovi)")
-        }
 
-        descents.clear()
-        for (seg in starred) {
-            val id = seg.getLong("id").toString()
-            val c = cache.optJSONObject(id) ?: continue
-            val start = seg.optJSONArray("start_latlng") ?: continue
-            if (start.length() < 2) continue
+            val start = seg.getJSONArray("start_latlng")
             val end = seg.optJSONArray("end_latlng")
-            val endLat = if (end != null && end.length() >= 2) end.getDouble(0) else start.getDouble(0)
-            val endLng = if (end != null && end.length() >= 2) end.getDouble(1) else start.getDouble(1)
+            val sLat = start.getDouble(0)
+            val sLng = start.getDouble(1)
+            val eLat = if (end != null && end.length() >= 2) end.getDouble(0) else sLat
+            val eLng = if (end != null && end.length() >= 2) end.getDouble(1) else sLng
+
             descents.add(
                 Descent(
                     seg.optString("name", "(senza nome)"),
-                    start.getDouble(0), start.getDouble(1),
-                    endLat, endLng,
-                    c.optString("poly", ""),
-                    c.optString("kom", "n/d"),
+                    sLat, sLng, eLat, eLng, poly, kom,
                     seg.optDouble("distance", 0.0).toInt()
                 )
             )
+            done++
+            if (done % 3 == 0) setStatus("Recupero KOM: $done / ${onlyDescents.size}")
         }
-        saveDescents()
 
-        status = if (rateLimited)
-            "Sincronizzati ${descents.size} di ${starred.size} segmenti.\n" +
-            "Limite Strava raggiunto: riapri l'app tra ~15 minuti e riprende da qui.\n" +
-            "Quelli già scaricati restano salvati."
-        else
-            "Sincronizzati ${descents.size} segmenti in discesa\n(su ${starred.size} preferiti in discesa)."
+        prefs.edit().putString("segcache", cache.toString()).apply()
     }
 
     private fun saveDescents() {
@@ -249,7 +260,7 @@ class MainActivity : ComponentActivity() {
         val code = conn.responseCode
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
         val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
-        if (code !in 200..299) throw RuntimeException("HTTP $code su ${conn.url}\n$text")
+        if (code !in 200..299) throw RuntimeException("HTTP $code")
         return text
     }
 
